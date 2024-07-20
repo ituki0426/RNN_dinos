@@ -1,30 +1,8 @@
 import numpy as np
 import os
-
-
-class DataGenerator:
-    def __init__(self, path):
-        self.path = path
-        with open(path) as f:
-            data = f.read().lower()
-        self.chars = list(set(data))
-        self.char_to_idx = {ch: i for (i, ch) in enumerate(self.chars)}
-        self.idx_to_char = {i: ch for (i, ch) in enumerate(self.chars)}
-        self.vocab_size = len(self.chars)
-        with open(path) as f:
-            self.examples = [x.lower().strip() for x in f.readlines()]
-
-    def generate_example(self, idx):
-        example_chars = self.examples[idx]
-        # 文字列をインデックスに変換
-        example_char_idx = [self.char_to_idx[ch] for ch in example_chars]
-        # X: 入力配列、開始文字として改行文字（\n）のインデックスを追加し、その後に例の文字列のインデックスを追加
-        X = [self.char_to_idx['\n']] + example_char_idx
-        # Y: 出力配列、例の文字列のインデックスの後に終了文字として改行文字（\n）のインデックスを追加
-        Y = example_char_idx + [self.char_to_idx['\n']]
-
-        return np.array(X), np.array(Y)
-
+from utils.adam import adam
+from utils.softmax import softmax
+from data.make_dataset import DataGenerator
 
 class RNN:
     def __init__(self, hidden_size, data_generator, sequence_length, learning_rate):
@@ -48,43 +26,36 @@ class RNN:
         self.sequence_length = sequence_length
         self.learning_rate = learning_rate
         self.X = None
-        # np.random.uniform(a, b, size) は、範囲 [a, b) で一様分布の乱数を生成
-        # -np.sqrt(1. / self.vocab_size) から np.sqrt(1. / self.vocab_size) の範囲で乱数を生成します。
-        self.Wax = np.random.uniform(-np.sqrt(1. / self.vocab_size), np.sqrt(
-            1. / self.vocab_size), (self.hidden_size, self.vocab_size))
-        self.Waa = np.random.uniform(-np.sqrt(1. / self.hidden_size), np.sqrt(
-            1. / self.hidden_size), (self.hidden_size, self.hidden_size))
-        self.Wya = np.random.uniform(-np.sqrt(1. / self.hidden_size), np.sqrt(
-            1. / self.hidden_size), (self.vocab_size, self.hidden_size))
 
-        self.ba = np.zeros((self.hidden_size, 1))
-        self.by = np.zeros((self.vocab_size, 1))
-
-        self.dWax, self.dWaa, self.dWya = np.zeros_like(
-            self.Wax), np.zeros_like(self.Waa), np.zeros_like(self.Wya)
-        self.dba, self.dby = np.zeros_like(self.ba), np.zeros_like(self.by)
-        self.mWax = np.zeros_like(self.Wax)
-        self.vWax = np.zeros_like(self.Wax)
-        self.mWaa = np.zeros_like(self.Waa)
-        self.vWaa = np.zeros_like(self.Waa)
-        self.mWya = np.zeros_like(self.Wya)
-        self.vWya = np.zeros_like(self.Wya)
-        self.mba = np.zeros_like(self.ba)
-        self.vba = np.zeros_like(self.ba)
-        self.mby = np.zeros_like(self.by)
-        self.vby = np.zeros_like(self.by)
-
-    def softmax(self, x):
-        """
-        Coumputes the softmax activation for a given input array.
-        Parameters:
-            s(ndarray) : Input array.
-        Returns:
-            ndarray : Array of the same shape as 'x', containing the softmax activation values.
-        """
-        x = x - np.max(x)
-        p = np.exp(x)
-        return p / np.sum(p)
+        self.param = {
+            # np.random.uniform(a, b, size) は、範囲 [a, b) で一様分布の乱数を生成
+            # -np.sqrt(1. / self.vocab_size) から np.sqrt(1. / self.vocab_size) の範囲で乱数を生成します。
+            "Wax": np.random.uniform(-np.sqrt(1. / self.vocab_size), np.sqrt(1. / self.vocab_size), (self.hidden_size, self.vocab_size)),
+            "Waa": np.random.uniform(-np.sqrt(1. / self.hidden_size), np.sqrt(1. / self.hidden_size), (self.hidden_size, self.hidden_size)),
+            "Wya": np.random.uniform(-np.sqrt(1. / self.hidden_size), np.sqrt(1. / self.hidden_size), (self.vocab_size, self.hidden_size)),
+            "ba": np.zeros((self.hidden_size, 1)),
+            "by": np.zeros((self.vocab_size, 1))
+        }
+        self.grad = {
+            "dWax": np.zeros_like(self.param["Wax"]),
+            "dWaa": np.zeros_like(self.param["Waa"]),
+            "dWya": np.zeros_like(self.param["Wya"]),
+            "dba": np.zeros_like(self.param["ba"]),
+            "dby": np.zeros_like(self.param["by"])
+        }
+        self.grad_adam = {
+            "mWax": np.zeros_like(self.param["Wax"]),
+            "vWax": np.zeros_like(self.param["Wax"]),
+            "mWaa": np.zeros_like(self.param["Waa"]),
+            "vWaa": np.zeros_like(self.param["Waa"]),
+            "mWya": np.zeros_like(self.param["Wya"]),
+            "vWya": np.zeros_like(self.param["Wya"]),
+            "mba": np.zeros_like(self.param["ba"]),
+            "vba": np.zeros_like(self.param["ba"]),
+            "mby": np.zeros_like(self.param["by"]),
+            "vby": np.zeros_like(self.param["by"])
+        }
+        
 
     def forward(self, X, a_prev):
         """
@@ -110,9 +81,9 @@ class RNN:
                 # self.X[t]]は現在の入力文字のインデックスであり、そのインデックスに対応する位置に1を設定
                 # keyがtのxは、形状が (vocab_size, 1) のワンホットエンコーディングされた入力データ
                 x[t][self.X[t]] = 1
-                a[t] = np.tanh(np.dot(self.Wax, x[t]) +
-                               np.dot(self.Waa, a[t-1]) + self.ba)
-                y_pred[t] = self.softmax(np.dot(self.Wya, a[t]) + self.by)
+                a[t] = np.tanh(np.dot(self.param["Wax"], x[t]) +
+                               np.dot(self.param["Waa"], a[t-1]) + self.param["ba"])
+                y_pred[t] = softmax(np.dot(self.param["Wya"], a[t]) + self.param["by"])
         return x, a, y_pred
 
     def backward(self, x, a, y_preds, targets):
@@ -124,63 +95,24 @@ class RNN:
             # softmaxの逆伝播
             dy_preds[targets[t]] -= 1
 
-            da = np.dot(self.Waa.T, da_next) + np.dot(self.Wya.T, dy_preds)
+            da = np.dot(self.param["Waa"].T, da_next) + np.dot(self.param["Wya"].T, dy_preds)
             dtanh = (1 - np.power(a[t], 2))
             da_unactivated = dtanh * da
 
-            self.dba += da_unactivated
-            self.dWax += np.dot(da_unactivated, x[t].T)
-            self.dWaa += np.dot(da_unactivated, a[t-1].T)
+            self.grad["dba"] += da_unactivated
+            self.grad["dWax"] += np.dot(da_unactivated, x[t].T)
+            self.grad["dWaa"] += np.dot(da_unactivated, a[t-1].T)
 
             da_next = da_unactivated
 
-            self.dWya += np.dot(dy_preds, a[t].T)
+            self.grad["dWya"] += np.dot(dy_preds, a[t].T)
 
-            for grad in [self.dWax, self.dWaa, self.dWya, self.dba, self.dby]:
+            for grad in [self.grad["dWax"], self.grad["dWaa"], self.grad["dWya"], self.grad["dba"], self.grad["dby"]]:
                 np.clip(grad, -1, 1, out=grad)
 
     def loss(self, y_preds, targets):
         # calculate the loss
         return sum(-np.log(y_preds[t][targets[t], 0]) for t in range(len(self.X)))
-
-    def adamw(self, beta1=0.9, beta2=0.999, epsilon=1e-8, L2_reg=1e-4):
-        """
-        Updates the RNN's parameters using the AdamW optimization algorithm.
-        """
-        self.mWax = beta1 * self.mWax + (1 - beta1) * self.dWax
-        self.vWax = beta2 * self.vWax + (1 - beta2) * np.square(self.dWax)
-        m_hat = self.mWax / (1 - beta1)
-        v_hat = self.vWax / (1 - beta2)
-        self.Wax -= self.learning_rate * \
-            (m_hat / (np.sqrt(v_hat) + epsilon) + L2_reg * self.Wax)
-
-        self.mWaa = beta1 * self.mWaa + (1 - beta1) * self.dWaa
-        self.vWaa = beta2 * self.vWaa + (1 - beta2) * np.square(self.dWaa)
-        m_hat = self.mWaa / (1 - beta1)
-        v_hat = self.vWaa / (1 - beta2)
-        self.Waa -= self.learning_rate * \
-            (m_hat / (np.sqrt(v_hat) + epsilon) + L2_reg * self.Waa)
-
-        self.mWya = beta1 * self.mWya + (1 - beta1) * self.dWya
-        self.vWya = beta2 * self.vWya + (1 - beta2) * np.square(self.dWya)
-        m_hat = self.mWya / (1 - beta1)
-        v_hat = self.vWya / (1 - beta2)
-        self.Wya -= self.learning_rate * \
-            (m_hat / (np.sqrt(v_hat) + epsilon) + L2_reg * self.Wya)
-
-        self.mba = beta1 * self.mba + (1 - beta1) * self.dba
-        self.vba = beta2 * self.vba + (1 - beta2) * np.square(self.dba)
-        m_hat = self.mba / (1 - beta1)
-        v_hat = self.vba / (1 - beta2)
-        self.ba -= self.learning_rate * \
-            (m_hat / (np.sqrt(v_hat) + epsilon) + L2_reg * self.ba)
-
-        self.mby = beta1 * self.mby + (1 - beta1) * self.dby
-        self.vby = beta2 * self.vby + (1 - beta2) * np.square(self.dby)
-        m_hat = self.mby / (1 - beta1)
-        v_hat = self.vby / (1 - beta2)
-        self.by -= self.learning_rate * \
-            (m_hat / (np.sqrt(v_hat) + epsilon) + L2_reg * self.by)
 
     def sample(self):
         """
@@ -203,10 +135,10 @@ class RNN:
 
         while (idx != newline_character and counter != max_chars):
             # compute the hidden state
-            a = np.tanh(np.dot(self.Wax, x) +
-                        np.dot(self.Waa, a_prev) + self.ba)
+            a = np.tanh(np.dot(self.param["Wax"], x) +
+                        np.dot(self.param["Waa"], a_prev) + self.param["ba"])
             # compute the output probabilities
-            y = self.softmax(np.dot(self.Wya, a) + self.by)
+            y = softmax(np.dot(self.param["Wya"], a) + self.param["by"])
 
             idx = np.random.choice(range(self.vocab_size), p=y.ravel())
 
@@ -250,7 +182,7 @@ class RNN:
 
             # caluculate and update loss
             loss = self.loss(y_preds, targets)
-            self.adamw()
+            adam(self.param, self.grad_adam, self.grad, self.learning_rate, beta1= 0.9, beta2 = 0.999, epsilon = 1e-8, L2_reg = 1e-4)
             smooth_loss = 0.999 * smooth_loss + 0.001 * loss
 
             a_prev = a[len(self.X) - 1]
@@ -292,9 +224,9 @@ class RNN:
         newline_character = self.data_generator.char_to_idx['\n']
         counter = 0
         while (idx != newline_character and counter != max_chars):
-            a = np.tanh(np.dot(self.Wax, x) +
-                        np.dot(self.Waa, a_prev) + self.ba)
-            y_pred = self.softmax(np.dot(self.Wya, a) + self.by)
+            a = np.tanh(np.dot(self.param["Wax"], x) +
+                        np.dot(self.param["Waa"], a_prev) + self.param["ba"])
+            y_pred = softmax(np.dot(self.param["Wya"], a) + self.param["by"])
             idx = np.random.choice(range(self.vocab_size), p=y_pred.ravel())
 
             x = np.zeros((self.vocab_size, 1))

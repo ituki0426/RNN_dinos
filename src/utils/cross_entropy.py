@@ -1,5 +1,5 @@
 import numpy as np
-def loss(y_preds, targets, len_vocab):
+def coross_entropy(y_preds, targets, len_vocab):
     """
         Computes the cross-entropy loss for a given sequence of predicted probabilities and true targets.
 
